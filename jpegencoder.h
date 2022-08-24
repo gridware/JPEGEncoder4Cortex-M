@@ -16,28 +16,30 @@
 #ifndef JPEGENCODER_H
 #define JPEGENCODER_H
 
-#include "jpegDef.h"
+#include <stdint.h>
 
 #define BLOCK_SIZE 8
 #define MCU_SIZE_GRAY 8
 #define MCU_SIZE_COLOR 16
 
-#define JPEG_HEADER_SIZE_GRAY_SCALE 324
-#define JPEG_HEADER_SIZE_FULL_COLOR 607
+#define JPEG_HEADER_SIZE_GRAY_SCALE (324+20)
+#define JPEG_HEADER_SIZE_FULL_COLOR (607+20)   // Careful!  This is hardcoded length!
 #define JPEG_BUF_SIZE JPEG_HEADER_SIZE_FULL_COLOR
 
 
 typedef enum quality_rate {
-        normal,
-        lowest,
-        lower,
-        low,
-        higher,
-        highest
+  lowest,     // 0 - 00
+  lower,      // 1 - 10
+  low,        // 2 - 50
+  normal,     // 3 - 90
+  higher,     // 4 - 95
+  highest,    // 5 - 100
+
+  max_quality = highest
 } quality_rate;
 
 typedef enum color_type {
-        YUV411,
+        YUV422,
         gray_scale  //8bits
 } color_type;
 
@@ -45,22 +47,23 @@ typedef struct color_info{
     color_type color;
     int mcu_size;
     int byte_size;
-    int pixel_size_by_byte;
+    int pixel_size_by_byte;   // # bytes per pixel
 } color_info;
 
 typedef struct jpeg_data {
     int width;
     int height;
-    int mcu_width_max;
-    int mcu_height_max;
+    int mcu_width_max;    // # of MCUs in width
+    int mcu_height_max;   // # of MCUs in height
     color_info c_info;
     quality_rate quality;
+    uint8_t comment[16];
     
-    uint8_t ret_data[JPEG_BUF_SIZE];
+    uint8_t ret_data[JPEG_BUF_SIZE];   // 627by
     int data_len; 
     
     struct{
-        uint_t rest;
+        uint32_t rest;
         uint8_t  byte;
     }stream;
     
@@ -69,17 +72,17 @@ typedef struct jpeg_data {
     int pre_DC_Cr;
     
     struct {
-        uint8_t block_y[BLOCK_SIZE*BLOCK_SIZE];
-        uint8_t block_Cr[BLOCK_SIZE*BLOCK_SIZE];
-        uint8_t block_Cb[BLOCK_SIZE*BLOCK_SIZE];
-        int block_int[BLOCK_SIZE*BLOCK_SIZE];
-        uint8_t mcu[MCU_SIZE_COLOR*MCU_SIZE_COLOR];
-        int temp[BLOCK_SIZE*BLOCK_SIZE];
+        uint8_t block_y[BLOCK_SIZE*BLOCK_SIZE];   //64by
+        uint8_t block_Cr[BLOCK_SIZE*BLOCK_SIZE];  //64by
+        uint8_t block_Cb[BLOCK_SIZE*BLOCK_SIZE];  //64by
+        int block_int[BLOCK_SIZE*BLOCK_SIZE];     //256by
+        uint8_t mcu[MCU_SIZE_COLOR*MCU_SIZE_COLOR*2];  //512by
+        int temp[BLOCK_SIZE*BLOCK_SIZE];           //256by
     }work;
 } jpeg_data ;
 
 static const color_info color_info_gray_scale = {gray_scale, MCU_SIZE_GRAY, 8, 1};
-static const color_info color_info_yuv411 = {YUV411, MCU_SIZE_COLOR, 16, 2};
+static const color_info color_info_YUV422 = {YUV422, MCU_SIZE_COLOR, 16, 2};
 
 /* Prototype */
 /**
@@ -121,6 +124,6 @@ int encode_MCU(jpeg_data *data, const uint8_t *mcu);
  * @param write_data_func Writing Ecoding data Function
  * @return JPEG file size. Under 0 is error.
  */
-int encode_image(jpeg_data *data, int (*read_data_func)(uint_t pos, uint8_t *data, uint_t len), int (*write_data_func)(uint8_t *data, uint_t len));
+int encode_image(jpeg_data *data, int (*read_data_func)(uint32_t pos, uint8_t *data, uint32_t len), int (*write_data_func)(uint8_t *data, uint32_t len));
 
 #endif

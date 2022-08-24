@@ -20,6 +20,8 @@
 #include "jpegencoder.h"
 
 #define QUANT_SIZE BLOCK_SIZE*BLOCK_SIZE
+// define if image size is not an integral # of MCU's
+//#define NON_INTEGRAL_MCU
 
 /**
  ISO/IEC 10918 ITU-T Recommendation T.81 Appendix:K
@@ -66,6 +68,7 @@ static const uint8_t std_luminance_quant_tbl_10[] = {
     0x5F, 0x62, 0x67, 0x68, 0x67, 0x3E, 0x4D, 0x71,
     0x79, 0x70, 0x64, 0x78, 0x5C, 0x65, 0x67, 0x63
 };
+#if 0 // unused
 /**
  * Standard quantization table For luminance (sorted by zigzag_tbl).
  * Quality rate is "20".
@@ -80,6 +83,7 @@ static const uint8_t std_luminance_quant_tbl_20[] = {
     0x4C, 0x4E, 0x52, 0x53, 0x52, 0x31, 0x3D, 0x5A, 
     0x60, 0x59, 0x50, 0x60, 0x49, 0x50, 0x52, 0x4F
 };
+#endif
 /**
  * Standard quantization table For luminance (sorted by zigzag_tbl).
  * Quality rate is "50".
@@ -165,6 +169,7 @@ static const uint8_t std_chrominance_quant_tbl_10[] = {
     0x63, 0x63, 0x63, 0x63, 0x63, 0x63, 0x63, 0x63, 
     0x63, 0x63, 0x63, 0x63, 0x63, 0x63, 0x63, 0x63
 };
+#if 0 // unused
 /**
  * Standard quantization table For chrominance (sorted by zigzag_tbl).
  * Quality rate is "20".
@@ -179,6 +184,7 @@ static const uint8_t std_chrominance_quant_tbl_20[] = {
     0x4F, 0x4F, 0x4F, 0x4F, 0x4F, 0x4F, 0x4F, 0x4F, 
     0x4F, 0x4F, 0x4F, 0x4F, 0x4F, 0x4F, 0x4F, 0x4F
 };
+#endif
 /**
  * Standard quantization table For chrominance (sorted by zigzag_tbl).
  * Quality rate is "50".
@@ -520,7 +526,7 @@ static int coding_huff(jpeg_data *data, const int *block, const int pre_DC,
                     const uint8_t *dc_huff_len_tbl, const int16_t *dc_huff_code_tbl, 
                     const uint8_t *ac_huff_len_tbl, const int16_t *ac_huff_code_tbl);
 
-static void put_bits(jpeg_data *data, const uint_t nbits, const uint16_t val);
+static void put_bits(jpeg_data *data, const uint32_t nbits, const uint16_t val);
 static void put_byte(jpeg_data *data, const uint8_t val);
 static void flush_bits(jpeg_data *data);
 static int init_data(jpeg_data *data);
@@ -551,6 +557,15 @@ int generate_header(jpeg_data *data) {
     {
         // SOI
         p[cnt++]=0xFF;p[cnt++]=0xD8;
+        // COM (comment)
+        uint8_t com_len = strlen((const char *)data->comment);
+        if(com_len > 0) {
+            p[cnt++]=0xFF;p[cnt++]=0xFE;//COM
+            p[cnt++]=0x00;p[cnt++]=2+com_len; //Lc(Length)
+            strncpy((char *)&p[cnt], (const char *)data->comment, com_len);
+            cnt += com_len;
+        }
+
 
         // APP0(JFIF)
         p[cnt++]=0xFF;p[cnt++]=0xE0;//APP0
@@ -724,7 +739,7 @@ int encode_MCU(jpeg_data *data, const uint8_t *mcu) {
         case gray_scale:
             ret = encode_block_mode(data, mcu, Y);
             break;
-        case YUV411:
+        case YUV422:
         default:
             ret = split_MCU(data, mcu);
             break;
@@ -739,73 +754,105 @@ int encode_MCU(jpeg_data *data, const uint8_t *mcu) {
  *
  * @param data JPEG Structure
  * @param read_data_func Reading Image data function
- * @param write_data_func Writing Ecoding data Function
+ * @param write_data_func Writing Encoding data Function
  * @return JPEG file size. Under 0 is error.
  */
-int encode_image(jpeg_data *data, int (*read_data_func)(uint_t pos, uint8_t *data, uint_t len), int (*write_data_func)(uint8_t *data, uint_t len)) {
+int encode_image(jpeg_data *data, int (*read_data_func)(uint32_t pos, uint8_t *data, uint32_t len), int (*write_data_func)(uint8_t *data, uint32_t len)) {
+  int mcu_size = data->c_info.mcu_size;   // =16
+  int width =  data->width;
+  int height = data->height;
+  int pixel_size_by_byte = data->c_info.pixel_size_by_byte;   // =2
+  //CAUTION!!!!!!!!!! MUST initializing jpeg_data structure!
+  if(data->mcu_width_max == 0) {
+    data->mcu_width_max = (int)ceil(width / (float)mcu_size);     // = 640/16 = 40
+    data->mcu_height_max = (int)ceil(height / (float)mcu_size);    // = 480/16 = 30
+  }
+  int mcu_width_max = data->mcu_width_max;
+  int mcu_height_max = data->mcu_height_max;
+  uint8_t *mcu = data->work.mcu;
+#ifdef NON_INTEGRAL_MCU
+  uint8_t prePixel_y = 0;
+  uint8_t prePixel_Crb = 0;
+#endif
+  int cnt = 0;
 
-	int mcu_size = data->c_info.mcu_size;
-	int width =  data->width;
-	int height = data->height;
-	int pixel_size_by_byte = data->c_info.pixel_size_by_byte;
-        //CAUTION!!!!!!!!!! MUST initializing jpeg_data structure!
-        if(data->mcu_width_max == 0) {
-            data->mcu_width_max = (int)ceil(width / (float)mcu_size);
-            data->mcu_height_max = (int)ceil(height / (float)mcu_size);
+  generate_header(data);
+  if( write_data_func(data->ret_data, data->data_len) == 0) {
+    // Write Fail
+    return 0;
+  }
+  cnt += data->data_len;
+
+  //MCU by CbYCr format & Grayscale.
+  for(int cur_mcu_height = 0; cur_mcu_height < mcu_height_max; cur_mcu_height++) {
+    for(int cur_mcu_width = 0; cur_mcu_width < mcu_width_max; cur_mcu_width++) {
+      for(int cur_height = 0; cur_height < mcu_size; cur_height++) {
+#ifdef NON_INTEGRAL_MCU
+        if((cur_mcu_height*mcu_size + cur_height) >= height) {
+          // this is to handle non integral MCU cases
+          for(int i = 0; i < mcu_size*pixel_size_by_byte; i++) {
+            if(i%2 == 0) {
+              mcu[cur_height*mcu_size*pixel_size_by_byte + i] = prePixel_Crb;
+            } else {
+              mcu[cur_height*mcu_size*pixel_size_by_byte + i] = prePixel_y;
+            }
+          }
+        } else
+#endif
+        {
+
+#ifdef NON_INTEGRAL_MCU
+          for(int cur_width = 0; cur_width < mcu_size*pixel_size_by_byte; cur_width++) {
+            if(cur_mcu_width*mcu_size*pixel_size_by_byte + cur_width >= width*pixel_size_by_byte) {
+              // this is to handle non integral MCU cases
+              if(cur_width%2 == 0) {
+                mcu[cur_height*mcu_size*pixel_size_by_byte + cur_width] = prePixel_Crb;
+              } else {
+                mcu[cur_height*mcu_size*pixel_size_by_byte + cur_width] = prePixel_y;
+              }
+            } else {
+              if( read_data_func((cur_mcu_height*mcu_size + cur_height)*width*pixel_size_by_byte + (cur_mcu_width*mcu_size*pixel_size_by_byte + cur_width),
+                                 &mcu[cur_height*mcu_size*pixel_size_by_byte + cur_width],
+                                 1) == 0 ) {
+                // Read Fail
+                return 0;
+              }
+              if(cur_width%2 == 0) {
+                prePixel_Crb =  mcu[cur_height*mcu_size*pixel_size_by_byte + cur_width];
+              } else {
+                prePixel_y =  mcu[cur_height*mcu_size*pixel_size_by_byte + cur_width];
+              }
+            }
+          }
+
+#else 
+          // Read 32by MCU in one shot (integral MCU)
+          if( read_data_func((cur_mcu_height*mcu_size + cur_height)*width*pixel_size_by_byte + (cur_mcu_width*mcu_size*pixel_size_by_byte),
+                             &mcu[cur_height*mcu_size*pixel_size_by_byte],
+                             mcu_size*pixel_size_by_byte) == 0) {
+            // Read Fail
+            return 0;
+          }
+#endif
         }
-	int mcu_width_max = data->mcu_width_max;
-	int mcu_height_max = data->mcu_height_max;
-	uint8_t *mcu = data->work.mcu;
-	uint8_t prePixel_y = 0;
-	uint8_t prePixel_Crb = 0;
-	int cnt = 0;
+      }
+      encode_MCU(data, mcu);
+      if( write_data_func(data->ret_data, data->data_len) == 0 ) {
+        // Write Fail
+        return 0;
+      }
+      cnt += data->data_len;
+    }
+  }
 
-	generate_header(data);
-	write_data_func(data->ret_data, data->data_len);
-	cnt += data->data_len;
+  generateFooter(data);
+  if( write_data_func(data->ret_data, data->data_len) == 0 ) {
+    // Write Fail
+    return 0;
+  }
+  cnt += data->data_len;
 
-	//MUC by CbYCr format & Grayscale.
-	for(int cur_mcu_height = 0; cur_mcu_height < mcu_height_max; cur_mcu_height++) {
-	  for(int cur_mcu_width = 0; cur_mcu_width < mcu_width_max; cur_mcu_width++) {
-		  for(int cur_height = 0; cur_height < mcu_size; cur_height++) {
-			  if((cur_mcu_height*mcu_size + cur_height) >= height) {
-				  for(int i = 0; i < mcu_size*pixel_size_by_byte; i++) {
-					  if(i%2 == 0) {
-						  mcu[cur_height*mcu_size*pixel_size_by_byte + i] = prePixel_Crb;
-					  } else {
-						  mcu[cur_height*mcu_size*pixel_size_by_byte + i] = prePixel_y;
-					  }
-				  }
-			  } else {
-				  for(int cur_width = 0; cur_width < mcu_size*pixel_size_by_byte; cur_width++) {
-					  if(cur_mcu_width*mcu_size*pixel_size_by_byte + cur_width >= width*pixel_size_by_byte) {
-						  if(cur_width%2 == 0) {
-							  mcu[cur_height*mcu_size*pixel_size_by_byte + cur_width] = prePixel_Crb;
-						  } else {
-							  mcu[cur_height*mcu_size*pixel_size_by_byte + cur_width] = prePixel_y;
-						  }
-					  } else {
-						  read_data_func((cur_mcu_height*mcu_size + cur_height)*width*pixel_size_by_byte + (cur_mcu_width*mcu_size*pixel_size_by_byte + cur_width), &mcu[cur_height*mcu_size*pixel_size_by_byte + cur_width],1);
-						  if(cur_width%2 == 0) {
-							  prePixel_Crb =  mcu[cur_height*mcu_size*pixel_size_by_byte + cur_width];
-						  } else {
-							  prePixel_y =  mcu[cur_height*mcu_size*pixel_size_by_byte + cur_width];
-						  }
-					  }
-				  }
-			  }
-		  }
-		  encode_MCU(data, mcu);
-		  write_data_func(data->ret_data, data->data_len);
-		  cnt += data->data_len;
-	  }
-	}
-
-	generateFooter(data);
-	write_data_func(data->ret_data, data->data_len);
-	cnt += data->data_len;
-
-	return cnt;
+  return cnt;
 }
 
 
@@ -830,7 +877,8 @@ static int split_MCU(jpeg_data *data, const uint8_t *mcu) {
         for(int x = 0; x < 2; x++) {
             for(int cur_block_height = 0; cur_block_height < BLOCK_SIZE; cur_block_height++) {
                 for(int cur_block_width = 0; cur_block_width < BLOCK_SIZE; cur_block_width++) {
-                    block_y[cur_block_height*BLOCK_SIZE + cur_block_width] = mcu[((cur_block_height+(y*BLOCK_SIZE))*MCU_SIZE_COLOR*step) + (cur_block_width*step+(x*MCU_SIZE_COLOR))+1];
+                    block_y[cur_block_height*BLOCK_SIZE + cur_block_width]
+                            = mcu[((cur_block_height+(y*BLOCK_SIZE))*MCU_SIZE_COLOR*step) + (cur_block_width*step+(x*MCU_SIZE_COLOR))+1];
                 }
             }
             ret = encode_block_mode(data, block_y, Y);
@@ -1052,7 +1100,7 @@ static int coding_huff(jpeg_data *data, const int *block, const int pre_DC,
  * @param val Filled Encoding data
  */
 static void put_byte(jpeg_data *data, const uint8_t val){
-    uint_t pos = data->data_len;
+    uint32_t pos = data->data_len;
     data->ret_data[pos++] = val;
     data->data_len = pos;
 }
@@ -1063,16 +1111,16 @@ static void put_byte(jpeg_data *data, const uint8_t val){
  * @param nbits number of Huffman code's bits
  * @param val Filled Encoding data
  */
-static void put_bits(jpeg_data *data, const uint_t nbits, const uint16_t val) {
-    uint_t codebits = nbits;
+static void put_bits(jpeg_data *data, const uint32_t nbits, const uint16_t val) {
+    uint32_t codebits = nbits;
     uint16_t bits = val << (16 - codebits);
     uint8_t byte = data->stream.byte;
-    uint_t rest = data->stream.rest;
+    uint32_t rest = data->stream.rest;
     if(rest == 0) {
         rest = 8;
     }
     while(codebits != 0) {
-        uint_t n = codebits;
+        uint32_t n = codebits;
         if(n > rest){
             n = rest;
         }
@@ -1097,7 +1145,7 @@ static void put_bits(jpeg_data *data, const uint_t nbits, const uint16_t val) {
  * @param data JPEG Structure
  */
 static void flush_bits(jpeg_data *data) {
-    uint_t rest = data->stream.rest;
+    uint32_t rest = data->stream.rest;
     if((rest & 7) != 0) {
         uint8_t byte = data->stream.byte;
         byte = byte << rest;
